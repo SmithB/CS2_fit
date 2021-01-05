@@ -1,0 +1,9 @@
+-W=14000
+-t=2010,2021
+-g=500,1000,1
+-H=-1
+--DEM_file=/Volumes/insar9/ben/REMA/DEM_500m_filled/mosaic_500m_dem_filled.tif
+--DEM_tol=20
+--max_iterations=2
+-b=/home/ben/temp
+--calc_tide

@@ -1,0 +1,7 @@
+-W=20000
+-t=2010,2020
+-g=500,1000,1
+-H=1
+--DEM_file=/home/ben/git_repos/CS2_fit/Greenland_DEM.tif
+--DEM_tol=20
+-b=/Volumes/ice2/ben/CS2_fit/GL/base/
