@@ -5,15 +5,19 @@ Created on Tue Feb 26 17:12:48 2019
 
 @author: ben
 """
-import numpy as np
-import matplotlib.pyplot as plt
-from LSsurf.smooth_xytb_fit import smooth_xytb_fit
-from LSsurf.assign_firn_correction import assign_firn_correction
-from LSsurf.reread_data_from_fits import reread_data_from_fits
-import pointCollection as pc
-from LSsurf.read_CS2_data import read_cs2_data
-
 import os
+os.environ["MKL_NUM_THREADS"]="1"
+os.environ["OPENBLAS_NUM_THREADS"]="1"
+
+import numpy as np
+
+from LSsurf.smooth_xytb_fit import smooth_xytb_fit
+#from LSsurf.assign_firn_correction import assign_firn_correction
+from surfaceChange.reread_data_from_fits import reread_data_from_fits
+import pointCollection as pc
+from CS2_fit.read_CS2_data import read_CS2_data
+from pyTMD import compute_tide_corrections
+
 import h5py
 import sys
 import glob
@@ -36,33 +40,9 @@ def save_fit_to_file(S,  filename, sensor_dict=None, dzdt_lags=None):
         h5f.create_group('/meta/timing')
         for key in S['timing']:
             h5f['/meta/timing/'].attrs[key]=S['timing'][key]
-        if sensor_dict is not None:
-            h5f.create_group('meta/sensors')
-            for key in sensor_dict:
-                h5f['/meta/sensors'].attrs['sensor_%d' % key]=sensor_dict[key]
-        # this is how far we'll get if we're just in 'edit only' mode
-        if 'dz' not in S['m']:
-            return
-        h5f.create_group('/dz')
-        for ii, name in enumerate(['y','x','t']):
-            h5f.create_dataset('/dz/'+name, data=S['grids']['dz'].ctrs[ii])
-        h5f.create_dataset('/dz/dz', data=S['m']['dz'])
-        h5f.create_dataset('/dz/count', data=S['m']['count'])
-        h5f.create_group('/z0')
-        for ii, name in enumerate(['y','x']):
-            h5f.create_dataset('/z0/'+name, data=S['grids']['z0'].ctrs[ii])
-        h5f.create_dataset('/z0/z0', data=S['m']['z0'])
-        for lag in dzdt_lags:
-            this_name='dzdt_lag%d' % lag
-            h5f.create_dataset('/dz/'+this_name, data=S['m'][this_name])
-        h5f.create_group('/dz/center_average')
-        h5f.create_dataset('/dz/center_average/dz', data=S['m']['dz_bar'])
-        for lag in dzdt_lags:
-            this_name='dzdt_bar_lag%d' % lag
-            h5f.create_dataset('/dz/center_average/'+this_name, data=S['m'][this_name])
         h5f.create_group('/RMS')
         for key in S['RMS']:
-            h5f.create_dataset('/RMS/'+key, data=S['RMS'][key])
+           h5f.create_dataset('/RMS/'+key, data=S['RMS'][key])
         h5f.create_group('E_RMS')
         for key in S['E_RMS']:
             h5f.create_dataset('E_RMS/'+key, data=S['E_RMS'][key])
@@ -75,11 +55,16 @@ def save_fit_to_file(S,  filename, sensor_dict=None, dzdt_lags=None):
             y_slope=[S['m']['slope_bias'][key]['slope_y'] for key in sensors]
             h5f.create_dataset('/slope_bias/x_slope', data=np.array(x_slope))
             h5f.create_dataset('/slope_bias/y_slope', data=np.array(y_slope))
-        if 'PS_bias' in S['m']:
-            for ii, name in enumerate(['y','x']):
-                h5f.create_dataset('/PS_bias/'+name, data=S['grids']['dz'].ctrs[ii])
-            h5f.create_dataset('/PS_bias/PS_bias', data=S['m']['PS_bias'])
+        if sensor_dict is not None:
+            h5f.create_group('meta/sensors')
+            for key in sensor_dict:
+                h5f['/meta/sensors'].attrs['sensor_%d' % key]=sensor_dict[key]
+
+    for key , ds in S['m'].items():
+        if isinstance(ds, pc.grid.data):
+            ds.to_h5(filename, group=key)
     return
+
 
 def save_errors_to_file( S, filename, sensor_dict=None):
     with h5py.File(filename,'r+') as h5f:
@@ -101,32 +86,31 @@ def save_errors_to_file( S, filename, sensor_dict=None):
             h5f.create_dataset('/slope_bias/sigma/x_slope', data=np.array(x_slope))
             h5f.create_dataset('/slope_bias//sigma/y_slope', data=np.array(y_slope))
     return
- 
+
 
 def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'dz':5.e2, 'dt':0.5},  \
             hemisphere=1, reference_epoch=None, reread_dirs=None, max_iterations=5, N_subset=None, Edit_only=False, \
+            avg_scales=None, dzdt_lags=None,\
             sensor_dict={}, out_name=None, replace=False, DOPLOT=False, spring_only=False, \
-            geoid_file=None, mask_file=None, \
+            geoid_file=None, mask_file=None, calc_tide=False,\
             calc_error_file=None, DEM_file=None, DEM_tol=None):
     """
         Wrapper for smooth_xytb_fit that can find data and set the appropriate parameters
     """
-    print("fit_CS2: working on %s" % out_name)
+    print("fit_CS2: working on %s" % out_name, flush=True)
     baseline_code={'C':2, 'D':3}
     # temporary:
     if hemisphere==-1:
-        index_files={'C':{'POCA':['/Volumes/insar6/ben/Cryosat/POCA_h5_C/AA_REMA_v1_sigma4_Jan2020/GeoIndex.h5', \
-                     '/Volumes/insar6/ben/Cryosat/POCA_h5_C/AA_REMA_v1_sigma4/GeoIndex.h5'], \
-                     'swath':['/Volumes/insar6/ben/Cryosat/SW_h5_C/AA_REMA_v1_sigma4_Jan2020/GeoIndex.h5', \
-                              '/Volumes/insar6/ben/Cryosat/SW_h5_C/AA_REMA_v1_sigma4/GeoIndex.h5'] },
-                     'D':{'POCA': glob.glob('/Volumes/ice2/ben/CS2_data/AA/retrack/2*/index_POCA.h5'),
-                          'swath':[glob.glob('/Volumes/ice2/ben/CS2_data/AA/retrack/2*/index_sw.h5')]}
+        srs_proj4= '+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs'
+        index_files={ 'D':{'POCA': glob.glob('/Volumes/ice3/ben/CS2_data/AA/retrack/2*/*/index_POCA.h5'),
+                          'swath':glob.glob('/Volumes/ice3/ben/CS2_data/AA/retrack/2*/*/index_SW.h5')}
                      }
     if hemisphere==1:
-        index_files={'C':{'POCA':[glob.glob('/Volumes/ice2/ben/CS2_data/GL/retrack_BC/2*/index_POCA.h5')],
-                          'swath':[glob.glob('/Volumes/ice2/ben/CS2_data/GLretrack_BC/2*/index_SW.h5')]},
-                    'D':{'POCA':[glob.glob('/Volumes/ice2/ben/CS2_data/GL/retrack/2*/index_POCA.h5')],
-                          'swath':[glob.glob('/Volumes/ice2/ben/CS2_data/GLretrack/2*/index_SW.h5')]}
+        srs_proj4= '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs'
+        index_files={'C':{'POCA':glob.glob('/Volumes/ice2/ben/CS2_data/GL/retrack_BC/2*/index_POCA.h5'),
+                          'swath':glob.glob('/Volumes/ice2/ben/CS2_data/GL/retrack_BC/2*/index_SW.h5')},
+                    'D':{'POCA':glob.glob('/Volumes/ice2/ben/CS2_data/GL/retrack/2*/index_POCA.h5'),
+                          'swath':glob.glob('/Volumes/ice2/ben/CS2_data/GL/retrack/2*/index_SW.h5')}
                     }
 
     compute_E=False
@@ -141,7 +125,7 @@ def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'd
             out_name=out_name %(xy0[0]/1000, xy0[1]/1000)
         except:
             pass
-    
+
     if calc_error_file is not None:
         # get xy0 from the filename
         re_match=re.compile('E(.*)_N(.*).h5').search(calc_error_file)
@@ -152,17 +136,16 @@ def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'd
         N_subset=None
     elif reread_dirs is None:
         data=[]
-        for baseline in ['C','D']:
-
-            data += read_cs2_data(xy0, Wxy, index_files[baseline],
+        for baseline in index_files.keys():
+            data += [read_CS2_data(xy0, Wxy, index_files[baseline],
                                   apply_filters=True, DEM_file=DEM_file,
-                                  dem_tol=50)
+                                  dem_tol=50)]
             #'sigma':np.sqrt(0.2**2+0.5*(data.swath>0.5))
             data[-1].assign({'z':data[-1].h, \
-                  'sigma_corr': 2*(data.swath[-1]>0.5),
+                  'sigma_corr': 2*(data[-1].swath>0.5),
                   'baseline': baseline_code[baseline]+np.zeros_like(data[-1].swath)})
         if len(data) > 1:
-            data[0].index(~np.in1d(data[0].abs_orbit), np.unique(data[1].abs_orbit))
+            data[0].index(~np.in1d(data[0].abs_orbit, np.unique(data[1].abs_orbit)))
             data = pc.data().from_list(data)
         else:
             data=data[0]
@@ -172,8 +155,20 @@ def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'd
         orb_dict=pc.bin_rows(np.c_[D_sw.abs_orbit])
         D_sw_sub=pc.data().from_list([D_sw[orb_dict[key]].blockmedian(400) for key in orb_dict])
         data=pc.data().from_list([D_PC, D_sw_sub])
-    
+
         data.index((data.time>t_span[0]) & (data.time < t_span[1]))
+        if calc_tide:
+            if hemisphere==-1:
+                # note: compute_tide_correction returns a masked array.
+                # for now, we're going to convert it to an array by stripping the mask
+                temp=compute_tide_corrections(\
+                    data.x,data.y,(data.time-2000)*365.25*24*3600,
+                    DIRECTORY='/Volumes/ice3/tyler/tide_models',MODEL='CATS2008',
+                    EPOCH=(2000,1,1,0,0,0), TYPE='drift', TIME='utc')
+                temp[temp.mask]=np.NaN
+                data.assign({'tide':np.array(temp)})
+                data.z[np.isfinite(data.tide)] -= data.tide[np.isfinite(data.tide)]
+
     else:
         data, sensor_dict = reread_data_from_fits(xy0, Wxy, reread_dirs, template='E%d_N%d.h5')
         N_subset=None
@@ -189,26 +184,33 @@ def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'd
                       [xy0[1]-W['y']/1.8, xy0[1]+W['y']/1.8]])
         data.assign({'DEM':DEM.interp(data.x, data.y)})
 
-    data.index((data.swath==0) | (np.mod(np.arange(0, data.size), 2)==0))
+    # want less than 900K points
+    if data.size > 9e5:
+        D_sw=data[data.swath==1]
+        D_poca=data[data.swath==0]
+        D_sw.index(np.arange(0, D_sw.size, D_sw.size/(9e5-D_poca.size)).astype(int))
+        data=pc.data().from_list([D_sw, D_poca])
 
     # run the fit
     KWargs={'data':data,
      'W': W,
      'ctr':ctr,
      'spacing':spacing,
-     'E_RMS':E_RMS0, 
+     'srs_proj4':srs_proj4,
+     'mask_file':mask_file,
+     'E_RMS':E_RMS0,
      'E_RMS_d2x_PS_bias':1.e-7,
      'E_RMS_PS_bias':1,
      'compute_E':compute_E,
-     'verbose': True, 
+     'verbose': True,
+     'mask_scale':{0:10, 1:1},
      'max_iterations':max_iterations,
      'N_subset':N_subset,
      'bias_params':['abs_orbit','swath'],
      'DEM_tol':DEM_tol,
+     'avg_scales':avg_scales,
      'bias_filter':lambda D:D[D.swath>0.5]}
-    #print("WARNING WARNING WARNING::::SETTING BIAS_PARAMS AND PS_BIAS_RMS TO NONE!!!!!")
-    #KWargs['bias_params']=None
-    #KWargs['E_RMS_d2x_PS_bias']=None
+
     S=smooth_xytb_fit(**KWargs)
 
     if out_name is not None:
@@ -216,7 +218,7 @@ def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'd
             save_fit_to_file(S, out_name, sensor_dict, dzdt_lags=S['dzdt_lags'])
         else:
             save_errors_to_file(S, out_name, sensor_dict)
-    print("fit_CS2: done with %s" % out_name)
+    print("fit_CS2: done with %s" % out_name, flush=True)
     return S, data, sensor_dict
 
 def main(argv):
@@ -241,12 +243,22 @@ def main(argv):
     parser.add_argument('--E_d2z0dx2', type=float, default=0.02)
     parser.add_argument('--E_d3zdx2dt', type=float, default=0.0003)
     parser.add_argument('--data_gap_scale', type=float,  default=2500)
+    parser.add_argument('--max_iterations', type=int, default=8)
     parser.add_argument('--mask_file', type=str)
     parser.add_argument('--geoid_file', type=str)
     parser.add_argument('--DEM_file', type=str)
     parser.add_argument('--DEM_tol', type=float, default=10)
     parser.add_argument('--calc_error_file','-c', type=str)
+    parser.add_argument('--dzdt_lags', type=str, default='1,4', help='lags for which to calculate dz/dt, comma-separated list, no spaces')
+    parser.add_argument('--avg_scales', type=str, help='scales at which to report average errors, comma-separated list, no spaces')
+    parser.add_argument('--calc_tide', action='store_true')
+
     args=parser.parse_args()
+
+    if args.avg_scales is not None:
+        args.avg_scales = [np.int(temp) for temp in args.avg_scales.split(',')]
+    args.dzdt_lags = [np.int(temp) for temp in args.dzdt_lags.split(',')]
+
 
     args.grid_spacing = [np.float(temp) for temp in args.grid_spacing.split(',')]
     args.time_span = [np.float(temp) for temp in args.time_span.split(',')]
@@ -287,9 +299,19 @@ def main(argv):
             out_name=args.out_name, DOPLOT=False, \
             mask_file=args.mask_file, geoid_file=args.geoid_file, \
                 DEM_file=args.DEM_file, DEM_tol=args.DEM_tol, \
-                calc_error_file=args.calc_error_file)
+                calc_error_file=args.calc_error_file,
+                max_iterations=args.max_iterations,
+                avg_scales=args.avg_scales,
+                dzdt_lags=args.dzdt_lags,
+                calc_tide=args.calc_tide)
 
 if __name__=='__main__':
     main(sys.argv)
 
 # -440000. -560000. -W 40000 -t 2010,2019 -g 500,2000,1 -H -1 -b /Volumes/ice2/ben/CS2_fit/AA -o test1_halfdata.h5 --centers
+
+# for Antarctica
+#  -350000 -460000 --centers @/Volumes/ice2/ben/CS2_fit/AA/default_args_AA.txt
+
+# for Greenland:
+#  600000 -1240000 --centers  @/Volumes/ice2/ben/CS2_fit/GL/default_args_GL.txt
