@@ -4,5 +4,8 @@
 -H=-1
 --DEM_file=/Volumes/insar9/ben/REMA/DEM_500m_filled/mosaic_500m_dem_filled.tif
 --DEM_tol=40
--b=/Volumes/ice2/ben/CS2_fit/AA/base_tidecorr/
+-b=/Volumes/ice2/ben/CS2_fit/AA/base_PIG/
 --calc_tide
+--mask_file=/home/ben/git_repos/AA_delta_z/masks/bedmap2_thickness_gt_50_plus_sio_shelves_20200914.tif
+--dzdt_lags=1,2,4
+--avg_scales=20000,10000

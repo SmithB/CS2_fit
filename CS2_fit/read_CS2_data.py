@@ -14,46 +14,62 @@ import os
 import matplotlib.pyplot as plt
 from LSsurf.matlab_to_year import matlab_to_year
 
-def read_swath_data(xy0, W, index_file, apply_filters=True):
-    fields = ['x','y','time','h', 'power','coherence','AD','error_composite',\
+def read_swath_data(xy0, W, index_file, apply_filters=True, baseline_num=None):
+    fields = ['x','y','time','h', 'power','coherence',\
               'R_POCA', 'ambiguity','abs_orbit', 'block_h_spread',\
               'count','phase','R_offnadir','range_surf','seg_ind']
 
     D=pc.geoIndex().from_file(index_file).query_xy_box(xy0[0]+np.array([-W/2, W/2]), \
                    xy0[1]+np.array([-W/2, W/2]), fields=fields)
-    D=pc.data().from_list(D)
+    if D is not None:
+        D=pc.data().from_list(D)
     if D is None:
         return D
+
+    if baseline_num is not None:
+        D.assign({'baseline': np.zeros_like(D.x)+baseline_num})
+        if baseline_num==2:
+            D.power /= 2.
+
+    D.index(D.power>0.)
 
     D.time=matlab_to_year(D.time)
     #D.assign({'burst':D.pulse_num,
     D.assign({'swath':np.ones_like(D.x, dtype=bool)})
 
-    D.assign({'sigma':np.minimum(5, np.maximum(1, 0.95 -.4816*(np.log10(D.power)+14) +\
+    D.assign({'sigma':np.minimum(5, np.maximum(1, 0.95 -.4816*(np.log10(D.power)+14.3) +\
                                        1.12*np.sqrt(D.block_h_spread)))})
 
     if apply_filters:
         if np.any(D.count>1):
-            D.index( (D.power > 1e-17) & (D.power < 1e-13) & (D.error_composite==0) & \
+            D.index( (D.power > 1e-17) & (D.power < 1e-13) & \
                     (D.count > 3) & (D.block_h_spread < 15))
         else:
-            D.index( (D.power > 1e-17) & (D.power < 1e-13) & (D.error_composite==0))
+            D.index( (D.power > 1e-17) & (D.power < 1e-13) )
     return D
 
-def read_poca_data(xy0, W, index_file, apply_filters=True, DEM=None):
-    fields=['x','y','time','h', 'power','coherence','AD','error_composite', \
+def read_poca_data(xy0, W, index_file, apply_filters=True, DEM=None, baseline_num=None):
+    fields=['x','y','time','h', 'power','coherence', \
             'ambiguity','abs_orbit','phase','range_surf']
     D=pc.geoIndex().from_file(index_file).query_xy_box(xy0[0]+np.array([-W/2, W/2]), \
                    xy0[1]+np.array([-W/2, W/2]), fields=fields)
-    D=pc.data().from_list(D)
+    if D is not None:
+        D=pc.data().from_list(D)
     if D is None:
         return D
     D.time=matlab_to_year(D.time)
     #D.assign({'burst':D.pulse_num,
     D.assign({'swath':np.zeros_like(D.x, dtype=bool)})
 
+    if baseline_num is not None:
+        D.assign({'baseline': np.zeros_like(D.x)+baseline_num})
+        if baseline_num==2:
+            D.power /= 2.
+
+    D.index(D.power>0.)
+
     if DEM is not None:
-        gx, gy = np.gradient(DEM.z, DEM.x, DEM.y)
+        gx, gy = np.gradient(DEM.z, DEM.y, DEM.x)
         temp=DEM.copy()
         temp.z=np.abs(gx+1j*gy)
         DEM_slope_mag=temp.interp(D.x, D.y)
@@ -63,10 +79,14 @@ def read_poca_data(xy0, W, index_file, apply_filters=True, DEM=None):
         D.assign({'sigma':50*0.01+ np.maximum(0, -0.64*(np.log10(D.power)+14))})
 
     if apply_filters:
-        D.index((D.power > 1e-16) & (D.error_composite == 0) & (D.power < 1e-12))
+        try:
+            D.index((D.power > 5e-17)  & (D.power < 5e-13))
+        except Exception:
+            D.index((D.power > 5e-17)  & (D.power < 5e-13))
+
     return D
 
-def read_cs2_data(xy0, W, index_files, apply_filters=True, DEM_file=None, dem_tol=50):
+def read_CS2_data(xy0, W, index_files, apply_filters=True, DEM_file=None, dem_tol=50):
     if DEM_file is not None:
         DEM=pc.grid.data().from_geotif(DEM_file, bounds=[xy0[0]+np.array([-W/2, W/2]), \
                                     xy0[1]+np.array([-W/2, W/2])])
@@ -128,7 +148,7 @@ def test():
                  'swath':['/Volumes/insar6/ben/Cryosat/SW_h5_C/AA_REMA_v1_sigma4/GeoIndex.h5', \
                           '/Volumes/insar6/ben/Cryosat/POCA_h5_C/AA_REMA_v1_sigma4/GeoIndex.h5'] }
     bin_center=     [-1400000.,  -450000.]
-    D=read_cs2_data(bin_center, 7.1e4, index_files)
+    D=read_CS2_data(bin_center, 7.1e4, index_files)
     fig=plt.figure();
     fig.add_subplot(3, 1, 1)
     plt.hist2d(D.x[D.swath==0], D.y[D.swath==0], 25)
