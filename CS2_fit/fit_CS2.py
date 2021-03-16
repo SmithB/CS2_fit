@@ -93,7 +93,9 @@ def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'd
             avg_scales=None, dzdt_lags=None,\
             sensor_dict={}, out_name=None, replace=False, DOPLOT=False, spring_only=False, \
             geoid_file=None, mask_file=None, calc_tide=False,\
-            calc_error_file=None, DEM_file=None, DEM_tol=None):
+            bias_nsigma_edit=None, bias_nsigma_iteration=3,\
+            calc_error_file=None, data_file=None, restart_TSE=False,\
+            DEM_file=None, DEM_tol=None):
     """
         Wrapper for smooth_xytb_fit that can find data and set the appropriate parameters
     """
@@ -102,9 +104,11 @@ def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'd
     # temporary:
     if hemisphere==-1:
         srs_proj4= '+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs'
-        index_files={ 'D':{'POCA': glob.glob('/Volumes/ice3/ben/CS2_data/AA/retrack/2*/*/index_POCA.h5'),
-                          'swath':glob.glob('/Volumes/ice3/ben/CS2_data/AA/retrack/2*/*/index_SW.h5')}
-                     }
+        #index_files={ 'D':{'POCA': glob.glob('/Volumes/ice3/ben/CS2_data/AA/retrack/2*/*/index_POCA.h5'),
+        #                  'swath':glob.glob('/Volumes/ice3/ben/CS2_data/AA/retrack/2*/*/index_SW.h5')}}
+        index_files={ 'D':{'POCA': glob.glob('/Volumes/ice3/ben/CS2_data/AA/tiles/2*/*/POCA/GeoIndex.h5'),
+                          'swath':glob.glob('/Volumes/ice3/ben/CS2_data/AA/tiles/2*/*/sw/GeoIndex.h5')}}
+
     if hemisphere==1:
         srs_proj4= '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs'
         index_files={'C':{'POCA':glob.glob('/Volumes/ice2/ben/CS2_data/GL/retrack_BC/2*/index_POCA.h5'),
@@ -134,6 +138,10 @@ def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'd
         compute_E=True
         max_iterations=0
         N_subset=None
+    elif data_file is not None:
+        data=pc.data().from_h5(data_file, group='data')
+        ###testing
+        data.sigma_corr = 0.05 + 2*(data.swath>0.5)
     elif reread_dirs is None:
         data=[]
         for baseline in index_files.keys():
@@ -141,8 +149,9 @@ def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'd
                                   apply_filters=True, DEM_file=DEM_file,
                                   dem_tol=50)]
             #'sigma':np.sqrt(0.2**2+0.5*(data.swath>0.5))
+            ###testing
             data[-1].assign({'z':data[-1].h, \
-                  'sigma_corr': 2*(data[-1].swath>0.5),
+                  'sigma_corr': 0.05 + 2*(data[-1].swath>0.5),
                   'baseline': baseline_code[baseline]+np.zeros_like(data[-1].swath)})
         if len(data) > 1:
             data[0].index(~np.in1d(data[0].abs_orbit, np.unique(data[1].abs_orbit)))
@@ -168,10 +177,16 @@ def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'd
                 temp[temp.mask]=np.NaN
                 data.assign({'tide':np.array(temp)})
                 data.z[np.isfinite(data.tide)] -= data.tide[np.isfinite(data.tide)]
-
     else:
         data, sensor_dict = reread_data_from_fits(xy0, Wxy, reread_dirs, template='E%d_N%d.h5')
         N_subset=None
+        
+    if restart_TSE:
+        if 'three_sigma_edit' in data.fields:
+            data.three_sigma_edit=np.ones_like(data.x, dtype=bool)
+        else:
+            data.assign({'three_sigma_edit':np.ones_like(data.x, dtype=bool)})
+
     if reference_epoch is None:
         reference_epoch=np.ceil(len(np.arange(t_span[0], t_span[1], spacing['dt']))/2).astype(int)
 
@@ -209,8 +224,12 @@ def fit_CS2(xy0, Wxy=4e4, E_RMS={}, t_span=[2003, 2020], spacing={'z0':2.5e2, 'd
      'bias_params':['abs_orbit','swath'],
      'DEM_tol':DEM_tol,
      'avg_scales':avg_scales,
-     'bias_filter':lambda D:D[D.swath>0.5]}
-
+     'bias_filter': lambda D:D[D.swath>0.5],
+     'bias_nsigma_edit':bias_nsigma_edit, 
+     'bias_nsigma_iteration':bias_nsigma_iteration
+     }
+    ### testing
+    KWargs['bias_filter']=None
     S=smooth_xytb_fit(**KWargs)
 
     if out_name is not None:
@@ -249,8 +268,12 @@ def main(argv):
     parser.add_argument('--DEM_file', type=str)
     parser.add_argument('--DEM_tol', type=float, default=10)
     parser.add_argument('--calc_error_file','-c', type=str)
+    parser.add_argument('--data_file', type=str)
+    parser.add_argument('--restart_TSE', action='store_true', help='if reloading data, restart the three-sigma editing')
     parser.add_argument('--dzdt_lags', type=str, default='1,4', help='lags for which to calculate dz/dt, comma-separated list, no spaces')
     parser.add_argument('--avg_scales', type=str, help='scales at which to report average errors, comma-separated list, no spaces')
+    parser.add_argument('--bias_nsigma_edit', type=int, default=6, help='edit points whose estimated bias is more than this value times the expected')
+    parser.add_argument('--bias_nsigma_iteration', type=int, default=6, help='apply bias_nsigma_edit after this iteration')
     parser.add_argument('--calc_tide', action='store_true')
 
     args=parser.parse_args()
@@ -300,9 +323,13 @@ def main(argv):
             mask_file=args.mask_file, geoid_file=args.geoid_file, \
                 DEM_file=args.DEM_file, DEM_tol=args.DEM_tol, \
                 calc_error_file=args.calc_error_file,
+                data_file=args.data_file,
+                restart_TSE=args.restart_TSE, 
                 max_iterations=args.max_iterations,
                 avg_scales=args.avg_scales,
                 dzdt_lags=args.dzdt_lags,
+                bias_nsigma_edit=args.bias_nsigma_edit,
+                bias_nsigma_iteration=args.bias_nsigma_iteration,
                 calc_tide=args.calc_tide)
 
 if __name__=='__main__':
